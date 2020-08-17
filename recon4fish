@@ -1,0 +1,128 @@
+#! /usr/bin/fish
+
+##Checking dependencies
+if not test -x (command -v assetfinder)
+	echo "[-] assetfinder required to run script"
+	set dependent 1
+end
+    
+if not test -x (command -v amass)
+    echo "[-] amass required to run script"
+	set dependent 1
+end
+
+if not test -x (command -v gowitness)
+    echo "[-] gowitness required to run script"
+	set dependent 1
+end
+
+if not test -x (command -v httprobe)
+    echo "[-] httprobe required to run script"
+    set dependent 1
+end
+
+if not test -x (command -v subjack)
+    echo "[-] subjack required to run script"
+    set dependent 1
+end
+
+if not test -x (command -v waybackurls)
+    echo "[-] waybackurls required to run script"
+    set dependent 1
+end
+
+if not test -x (command -v google-chrome)
+    echo "[-] Google Chrome required to run script"
+    set dependent 1
+end
+
+if test "$dependent" = 1
+	exit
+end
+
+set url $argv
+
+cd .
+
+if not test -e "./Targets/" 
+	mkdir ./Targets/
+end
+
+if not test -e "./Targets/$url" 
+	mkdir ./Targets/$url
+	mkdir ./Targets/$url/recon
+	mkdir ./Targets/$url/recon/gowitness
+	mkdir ./Targets/$url/recon/scans
+	mkdir ./Targets/$url/recon/httprobe
+	mkdir ./Targets/$url/recon/potential_takeovers
+	touch ./Targets/$url/recon/potential_takeovers/potential_takeovers.txt
+	mkdir ./Targets/$url/recon/wayback
+	mkdir ./Targets/$url/recon/wayback/params
+	mkdir ./Targets/$url/recon/wayback/extensions
+	touch ./Targets/$url/recon/httprobe/alive.txt
+	touch ./Targets/$url/recon/final.txt
+end
+
+echo "[+] Harvesting subdomains with assetfinder..."
+assetfinder $url >> ./Targets/$url/recon/assets.txt
+cat ./Targets/$url/recon/assets.txt | grep $url >> ./Targets/$url/recon/final.txt
+rm ./Targets/$url/recon/assets.txt
+
+echo "[+] Double checking for subdomains with amass..."
+amass enum -d $url >> ./Targets/$url/recon/f.txt
+sort -u ./Targets/$url/recon/f.txt >> ./Targets/$url/recon/final.txt
+rm ./Targets/$url/recon/f.txt
+
+echo "[+] Probing for live domains..."
+cat ./Targets/$url/recon/final.txt | sort -u | httprobe >> ./Targets/$url/recon/httprobe/alive_URL.txt
+cat ./Targets/$url/recon/httprobe/alive_URL.txt | sed 's/https\?:\/\///' | uniq >> ./Targets/$url/recon/httprobe/alive.txt
+
+echo "[+] Checking for possible subdomain takeover..."
+subjack -w ./Targets/$url/recon/final.txt -t 100 -timeout 30 -ssl -c /go/src/github.com/haccer/subjack/fingerprints.json -v 3 -o ./Targets/$url/recon/potential_takeovers/potential_takeovers.txt
+
+echo "[+] Scanning for open ports..."
+nmap -iL ./Targets/$url/recon/httprobe/alive.txt -T4 -oA ./Targets/$url/recon/scans/scanned.txt
+
+echo "[+] Scraping wayback data..."
+cat ./Targets/$url/recon/final.txt | waybackurls >> ./Targets/$url/recon/wayback/tmp
+uniq ./Targets/$url/recon/wayback/tmp > ./Targets/$url/recon/wayback/wayback_output.txt
+rm ./Targets/$url/recon/wayback/tmp
+
+echo "[+] Pulling and compiling all possible params found in wayback data..."
+cat ./Targets/$url/recon/wayback/wayback_output.txt | grep '?*=' | cut -d '=' -f 1 | sort -u >> ./Targets/$url/recon/wayback/params/wayback_params.txt
+
+echo "[+] Pulling and compiling js/php/aspx/jsp/json files from wayback output..."
+while read -la line
+	switch $line
+	case "*.js*" 
+		echo $line >> ./Targets/$url/recon/wayback/extensions/js.txt
+	case "*.html*"
+		echo $line >> ./Targets/$url/recon/wayback/extensions/html.txt
+	case "*.jsp*"
+		echo $line >> ./Targets/$url/recon/wayback/extensions/jsp.txt
+	case "*.json*"
+		echo $line >> ./Targets/$url/recon/wayback/extensions/json.txt
+	case "*.php*"
+		echo $line >> ./Targets/$url/recon/wayback/extensions/php.txt
+	case "*.aspx*"
+		echo $line >> ./Targets/$url/recon/wayback/extensions/aspx.txt
+	end
+end < ./Targets/$url/recon/wayback/wayback_output.txt
+
+cat ./Targets/$url/recon/wayback/extensions/js.txt > ./Targets/$url/recon/wayback/extensions/tmp
+uniq ./Targets/$url/recon/wayback/extensions/tmp > ./Targets/$url/recon/wayback/extensions/js.txt
+cat ./Targets/$url/recon/wayback/extensions/html.txt  > ./Targets/$url/recon/wayback/extensions/tmp
+uniq ./Targets/$url/recon/wayback/extensions/tmp > ./Targets/$url/recon/wayback/extensions/html.txt
+cat ./Targets/$url/recon/wayback/extensions/jsp.txt > ./Targets/$url/recon/wayback/extensions/tmp
+uniq ./Targets/$url/recon/wayback/extensions/tmp > ./Targets/$url/recon/wayback/extensions/jsp.txt
+cat ./Targets/$url/recon/wayback/extensions/json.txt > ./Targets/$url/recon/wayback/extensions/tmp
+uniq ./Targets/$url/recon/wayback/extensions/tmp > ./Targets/$url/recon/wayback/extensions/json.txt
+cat ./Targets/$url/recon/wayback/extensions/php.txt > ./Targets/$url/recon/wayback/extensions/tmp
+uniq ./Targets/$url/recon/wayback/extensions/tmp > ./Targets/$url/recon/wayback/extensions/php.txt
+cat ./Targets/$url/recon/wayback/extensions/aspx.txt > ./Targets/$url/recon/wayback/extensions/tmp
+uniq ./Targets/$url/recon/wayback/extensions/tmp > ./Targets/$url/recon/wayback/extensions/aspx.txt
+rm ./Targets/$url/recon/wayback/extensions/tmp
+
+echo "[+] Running gowitness against all compiled domains..."
+gowitness file --source=./Targets/$url/recon/httprobe/alive_URL.txt --threads=4 --resolution="1200,750" --log-format=json --log-level=warn --timeout=60 --destination=./Targets/$url/recon/gowitness
+
